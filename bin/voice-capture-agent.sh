@@ -83,7 +83,7 @@ EOF
     source "$STATE_FILE"
 
     kill -INT "$REC_PID" 2>/dev/null || true
-    for i in $(seq 1 10); do
+    for _ in $(seq 1 10); do
       kill -0 "$REC_PID" 2>/dev/null || break
       sleep 0.5
     done
