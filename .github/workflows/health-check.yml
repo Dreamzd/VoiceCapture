@@ -1,9 +1,13 @@
 name: health-check
 
-# 每天定时体检 bin/ 下的脚本。设计原则：门禁从"当前实际状态"起步，
-# 只在真正坏掉时变红；风格问题走建议通道（写进 job summary），
-# 等你想收紧时再把它提成门禁。一上来就设一条过不了的线，
-# 唯一的效果是让人学会无视红灯。
+# 每天定时体检 bin/ 下的脚本。
+#
+# 门禁采用棘轮（ratchet）：只从"已测得的实际状态"往上收紧，绝不设一条当前过不了的线
+# —— 一上来就红的门禁，唯一效果是让人学会无视红灯。
+#
+# 2026-08-13 首次运行实测：shellcheck 在最严格的 style 级别下对 bin/*.sh 零发现。
+# 因此门禁直接锁在 style，把这个干净状态固定住。
+# ⚠️ 这条线只能往上拧。如果哪天要放松它，请在 commit message 里写明理由。
 
 on:
   schedule:
@@ -40,12 +44,31 @@ jobs:
           done
           echo "✅ 所有脚本语法正确"
 
-      # ── 门禁 2：shellcheck 的 error 级。只抓真正会出问题的，不抓风格。
-      - name: shellcheck（仅 error 级 · 门禁）
+      # ── 门禁 2：shellcheck 全量（style 是最低阈值 = 什么都报）。
+      #    首次运行实测为零发现，所以这条线是锁住现状，不是提高要求。
+      - name: shellcheck（style 级 · 门禁）
         run: |
           set -euo pipefail
-          shellcheck --severity=error --format=gcc bin/*.sh
-          echo "✅ 无 error 级问题"
+          if shellcheck --severity=style --format=tty bin/*.sh > /tmp/sc.txt 2>&1; then
+            echo "✅ shellcheck 零发现（style 级）"
+            echo "## ✅ shellcheck" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`bin/*.sh\` 在最严格的 \`style\` 级别下零发现。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            count=$(grep -cE '^In .* line [0-9]+:' /tmp/sc.txt || true)
+            {
+              echo "## ❌ shellcheck 发现 ${count} 处问题"
+              echo ""
+              echo "门禁锁在 \`style\` 级，因为 2026-08-13 实测这些脚本是零发现的。"
+              echo "下面每一条都是**新引入**的，不是历史遗留："
+              echo ""
+              echo '```'
+              head -c 60000 /tmp/sc.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cat /tmp/sc.txt
+            exit 1
+          fi
 
       # ── 门禁 3：依赖漂移。脚本用了某个要安装的外部命令，
       #    但 README 的依赖表没写 —— 这是会真实发生、且用户装不上就跑不起来的 bug。
@@ -74,28 +97,6 @@ jobs:
           fi
           echo "✅ 依赖表与脚本一致"
           echo "（系统自带、已豁免：$BUILTIN）"
-
-      # ── 建议通道：完整的 shellcheck 报告写进 job summary，不影响成败。
-      #    等你把它清干净了，再把上面那条门禁的 severity 从 error 提到 warning。
-      - name: shellcheck 完整报告（建议 · 不阻塞）
-        if: always()
-        run: |
-          {
-            echo "## shellcheck 完整报告（建议级，不影响成败）"
-            echo ""
-            if shellcheck --severity=style --format=tty bin/*.sh > /tmp/sc.txt 2>&1; then
-              echo "🎉 连 style 级都是干净的。"
-              echo ""
-              echo "> 可以考虑把门禁那步的 \`--severity=error\` 提到 \`warning\` 或 \`style\`，把当前状态锁住。"
-            else
-              count=$(grep -cE '^In .* line [0-9]+:' /tmp/sc.txt || true)
-              echo "发现 **${count}** 处建议改进（当前不阻塞）："
-              echo ""
-              echo '```'
-              head -c 60000 /tmp/sc.txt
-              echo '```'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
 
       # ── 只有定时任务失败才开 issue。PR / push 失败你当场就看见了，不需要 issue。
       #    并且先查有没有同类未关闭的 issue，避免每天刷一个。
