@@ -110,11 +110,12 @@ jobs:
             echo "已有未关闭的 health-check issue，不重复创建。"
             exit 0
           fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          printf -v body '%s\n\n%s\n\n%s' \
+            "定时的 health-check 失败了。" \
+            "运行记录：$RUN_URL" \
+            "这个 issue 由 workflow 自动创建。修好之后关掉它，下次失败才会再开新的。"
           gh issue create \
             --title "定时体检失败 · $(date -u '+%Y-%m-%d')" \
             --label health-check \
-            --body "定时的 health-check 失败了。
-
-运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-这个 issue 由 workflow 自动创建。修好之后关掉它，下次失败才会再开新的。"
+            --body "$body"
