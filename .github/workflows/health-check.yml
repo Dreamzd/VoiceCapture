@@ -1,0 +1,122 @@
+name: health-check
+
+# 每天定时体检 bin/ 下的脚本。
+#
+# 门禁采用棘轮（ratchet）：只从"已测得的实际状态"往上收紧，绝不设一条当前过不了的线
+# —— 一上来就红的门禁，唯一效果是让人学会无视红灯。
+#
+# 2026-08-13 实测：style 级下 bin/*.sh 只有 1 处 SC2034（未使用的循环计数器），
+# 已随本次一并修掉。清零之后把门禁锁在 style —— 今后任何新引入的问题都会被拦下。
+# ⚠️ 这条线只能往上拧。如果哪天要放松它，请在 commit message 里写明理由。
+
+on:
+  schedule:
+    # UTC 23:00 = 北京时间次日 07:00
+    # ⚠️ 仓库连续 60 天没有提交，GitHub 会自动停用定时任务，且提示很不显眼。
+    - cron: "0 23 * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - "bin/**"
+      - "README.md"
+      - ".github/workflows/health-check.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      # ── 门禁 1：语法。这条没有任何主观判断余地，坏了就是坏了。
+      - name: 语法检查（bash -n）
+        run: |
+          set -euo pipefail
+          for f in bin/*.sh; do
+            echo "→ $f"
+            bash -n "$f"
+          done
+          echo "✅ 所有脚本语法正确"
+
+      # ── 门禁 2：shellcheck 全量（style 是最低阈值 = 什么都报）。
+      #    首次运行实测为零发现，所以这条线是锁住现状，不是提高要求。
+      - name: shellcheck（style 级 · 门禁）
+        run: |
+          set -euo pipefail
+          if shellcheck --severity=style --format=tty bin/*.sh > /tmp/sc.txt 2>&1; then
+            echo "✅ shellcheck 零发现（style 级）"
+            echo "## ✅ shellcheck" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`bin/*.sh\` 在最严格的 \`style\` 级别下零发现。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            count=$(grep -cE '^In .* line [0-9]+:' /tmp/sc.txt || true)
+            {
+              echo "## ❌ shellcheck 发现 ${count} 处问题"
+              echo ""
+              echo "门禁锁在 \`style\` 级，因为 2026-08-13 实测这些脚本是零发现的。"
+              echo "下面每一条都是**新引入**的，不是历史遗留："
+              echo ""
+              echo '```'
+              head -c 60000 /tmp/sc.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cat /tmp/sc.txt
+            exit 1
+          fi
+
+      # ── 门禁 3：依赖漂移。脚本用了某个要安装的外部命令，
+      #    但 README 的依赖表没写 —— 这是会真实发生、且用户装不上就跑不起来的 bug。
+      - name: 依赖表漂移检查
+        run: |
+          set -euo pipefail
+
+          # macOS 自带、无需安装的命令，不要求写进 README
+          BUILTIN="caffeinate afinfo osascript sw_vers pmset"
+          # 需要用户自行安装的外部命令
+          EXTERNAL="ffmpeg whisper-cli SwitchAudioSource opencc sox jq"
+
+          missing=""
+          for cmd in $EXTERNAL; do
+            if grep -qE "\b${cmd}\b" bin/*.sh 2>/dev/null; then
+              if ! grep -qE "\b${cmd}\b" README.md; then
+                missing="$missing $cmd"
+              fi
+            fi
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::以下命令在脚本中被使用，但 README 依赖表里没有：$missing"
+            echo "用户按 README 装完依赖后仍然跑不起来。请补进 README 的「前置依赖」一节。"
+            exit 1
+          fi
+          echo "✅ 依赖表与脚本一致"
+          echo "（系统自带、已豁免：$BUILTIN）"
+
+      # ── 只有定时任务失败才开 issue。PR / push 失败你当场就看见了，不需要 issue。
+      #    并且先查有没有同类未关闭的 issue，避免每天刷一个。
+      - name: 定时任务失败时开 issue
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --label health-check --state open --json number --jq 'length')
+          if [ "$existing" -gt 0 ]; then
+            echo "已有未关闭的 health-check issue，不重复创建。"
+            exit 0
+          fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          printf -v body '%s\n\n%s\n\n%s' \
+            "定时的 health-check 失败了。" \
+            "运行记录：$RUN_URL" \
+            "这个 issue 由 workflow 自动创建。修好之后关掉它，下次失败才会再开新的。"
+          gh issue create \
+            --title "定时体检失败 · $(date -u '+%Y-%m-%d')" \
+            --label health-check \
+            --body "$body"
